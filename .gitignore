@@ -1,0 +1,10 @@
+.DS_Store
+build/
+*.app
+*.dSYM
+*.xcworkspace
+*.xcodeproj
+DerivedData/
+*.swp
+*.tmp
+*.log
