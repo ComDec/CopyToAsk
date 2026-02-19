@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build app
+        run: |
+          chmod +x ./build.sh
+          ./build.sh
+
+      - name: Package
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "build/CopyToAsk.app" "CopyToAsk-macos.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CopyToAsk-macos
+          path: CopyToAsk-macos.zip
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: CopyToAsk-macos.zip
+          generate_release_notes: true
