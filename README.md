@@ -101,6 +101,4 @@ Keys (default):
 
 PRs are welcome.
 
-- Keep changes focused and easy to review
-- Run `./build.sh` before opening a PR
-- If you touch any UI strings, consider the interface language setting (EN/ZH)
+- See `CONTRIBUTING.md`

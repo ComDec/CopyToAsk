@@ -101,6 +101,4 @@ macOS 的隐私权限（TCC，例如 Accessibility）与应用的代码签名绑
 
 欢迎提 PR：
 
-- 保持改动聚焦、易审阅
-- 提 PR 前请运行 `./build.sh`
-- 如果改动了 UI 文案，请注意界面语言（EN/ZH）
+- 参考 `CONTRIBUTING.md`
