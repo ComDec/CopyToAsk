@@ -23,59 +23,74 @@ struct HotKeyDefinition: Equatable {
   }
 }
 
+enum HotKeyAction: Int, CaseIterable {
+  case explain = 1
+  case ask = 2
+  case setContext = 3
+}
+
 final class HotKeyManager {
-  var onHotKey: (() -> Void)?
-
-  private var hotKeyRef: EventHotKeyRef?
   private var eventHandlerRef: EventHandlerRef?
+  private let signature = OSType(UInt32(truncatingIfNeeded: 0x43544F41)) // 'CTOA'
 
-  private var current = HotKeyDefinition.default
-  private let hotKeyID = EventHotKeyID(signature: OSType(UInt32(truncatingIfNeeded: 0x43544F41)), id: 1) // 'CTOA'
+  private var refs: [HotKeyAction: EventHotKeyRef] = [:]
+  private var defs: [HotKeyAction: HotKeyDefinition] = [:]
+  private var handlers: [HotKeyAction: () -> Void] = [:]
 
-  func register(defaultIfNil def: HotKeyDefinition? = nil) {
-    if eventHandlerRef == nil {
-      var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-      let selfPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-      InstallEventHandler(GetApplicationEventTarget(), { _, eventRef, userData in
-        guard let userData else { return noErr }
-        let manager = Unmanaged<HotKeyManager>.fromOpaque(userData).takeUnretainedValue()
-        var hkID = EventHotKeyID()
-        GetEventParameter(eventRef, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hkID)
-        if hkID.signature == manager.hotKeyID.signature && hkID.id == manager.hotKeyID.id {
-          manager.onHotKey?()
-        }
-        return noErr
-      }, 1, &eventSpec, selfPtr, &eventHandlerRef)
-    }
+  func installIfNeeded() {
+    if eventHandlerRef != nil { return }
+    var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+    let selfPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+    InstallEventHandler(GetApplicationEventTarget(), { _, eventRef, userData in
+      guard let userData else { return noErr }
+      let manager = Unmanaged<HotKeyManager>.fromOpaque(userData).takeUnretainedValue()
+      var hkID = EventHotKeyID()
+      GetEventParameter(eventRef, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hkID)
+      guard hkID.signature == manager.signature else { return noErr }
+      guard let action = HotKeyAction(rawValue: Int(hkID.id)) else { return noErr }
+      manager.handlers[action]?()
+      return noErr
+    }, 1, &eventSpec, selfPtr, &eventHandlerRef)
+  }
 
-    if let def { current = def }
-    registerOrReregisterCurrent()
+  func setHandler(for action: HotKeyAction, handler: @escaping () -> Void) {
+    handlers[action] = handler
+  }
+
+  func getDefinition(for action: HotKeyAction) -> HotKeyDefinition? {
+    defs[action]
   }
 
   @discardableResult
-  func setHotKey(_ def: HotKeyDefinition) -> OSStatus {
-    current = def
-    return registerOrReregisterCurrent()
-  }
+  func register(action: HotKeyAction, definition: HotKeyDefinition) -> OSStatus {
+    installIfNeeded()
 
-  func getHotKey() -> HotKeyDefinition {
-    current
-  }
-
-  @discardableResult
-  private func registerOrReregisterCurrent() -> OSStatus {
-    if let hotKeyRef {
-      UnregisterEventHotKey(hotKeyRef)
-      self.hotKeyRef = nil
+    if let ref = refs[action] {
+      UnregisterEventHotKey(ref)
+      refs.removeValue(forKey: action)
     }
-    let status = RegisterEventHotKey(current.keyCode, current.carbonModifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+
+    defs[action] = definition
+
+    var ref: EventHotKeyRef?
+    let hkID = EventHotKeyID(signature: signature, id: UInt32(action.rawValue))
+    let status = RegisterEventHotKey(definition.keyCode, definition.carbonModifiers, hkID, GetApplicationEventTarget(), 0, &ref)
+    if status == noErr, let ref {
+      refs[action] = ref
+    }
     return status
   }
 
-  deinit {
-    if let hotKeyRef {
-      UnregisterEventHotKey(hotKeyRef)
+  func unregisterAll() {
+    for (_, ref) in refs {
+      UnregisterEventHotKey(ref)
     }
+    refs.removeAll()
+    defs.removeAll()
+  }
+
+  deinit {
+    unregisterAll()
     if let eventHandlerRef {
       RemoveEventHandler(eventHandlerRef)
     }

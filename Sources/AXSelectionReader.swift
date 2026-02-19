@@ -1,6 +1,8 @@
 import Cocoa
 import ApplicationServices
 
+// Uses PasteboardFallback for Cmd+C fallback.
+
 enum SelectionAnchor {
   case rect(CGRect)
   case mouse
@@ -12,6 +14,7 @@ struct CapturedSelection {
   let source: String
 }
 
+@MainActor
 enum AXSelectionReader {
   static func ensureAccessibilityPermission(prompt: Bool) -> Bool {
     let opts: [String: Any] = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: prompt]
@@ -25,7 +28,10 @@ enum AXSelectionReader {
     guard focusedErr == .success, let focusedElement = focused else {
       return (nil, nil)
     }
-    let focusedAX = focusedElement as! AXUIElement
+    guard CFGetTypeID(focusedElement) == AXUIElementGetTypeID() else {
+      return (nil, nil)
+    }
+    let focusedAX = (focusedElement as! AXUIElement)
 
     // Some apps expose selection attributes on a parent of the focused element.
     let candidates = walkUpParents(from: focusedAX, maxDepth: 6)
@@ -87,6 +93,7 @@ enum AXSelectionReader {
       var parentValue: CFTypeRef?
       let err = AXUIElementCopyAttributeValue(c, kAXParentAttribute as CFString, &parentValue)
       guard err == .success, let pv = parentValue else { break }
+      guard CFGetTypeID(pv) == AXUIElementGetTypeID() else { break }
       let parent = pv as! AXUIElement
       out.append(parent)
       current = parent
@@ -96,20 +103,26 @@ enum AXSelectionReader {
   }
 }
 
+@MainActor
 enum SelectionCapture {
   static func capture() async -> CapturedSelection {
-    let (text, rect) = AXSelectionReader.readSelectedTextAndBounds()
+    let trusted = AXSelectionReader.ensureAccessibilityPermission(prompt: false)
+    var rect: CGRect? = nil
+    if trusted {
+      let (text, axRect) = AXSelectionReader.readSelectedTextAndBounds()
+      rect = axRect
 
-    let axText = (text ?? "").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-    if !axText.isEmpty {
-      return CapturedSelection(text: axText, anchor: rect.map { .rect($0) } ?? .mouse, source: "accessibility")
+      let axText = (text ?? "").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+      if !axText.isEmpty {
+        return CapturedSelection(text: axText, anchor: rect.map { .rect($0) } ?? .mouse, source: "accessibility")
+      }
     }
 
-    // Fallback: Cmd+C, read pasteboard, restore. If we already got bounds via AX,
-    // still use it to position the panel near the selection.
-    if let fallback = PasteboardFallback.copySelectionViaCmdCAndReadPasteboard() {
+    if let fallback = await PasteboardFallback.copySelectionViaCmdCAndReadPasteboardAsync() {
       let fb = fallback.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-      return CapturedSelection(text: fb, anchor: rect.map { .rect($0) } ?? .mouse, source: "pasteboard")
+      if !fb.isEmpty {
+        return CapturedSelection(text: fb, anchor: rect.map { .rect($0) } ?? .mouse, source: "pasteboard")
+      }
     }
 
     return CapturedSelection(text: "", anchor: .mouse, source: "none")

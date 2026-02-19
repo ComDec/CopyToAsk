@@ -1,44 +1,103 @@
 import Foundation
+import Cocoa
 
 struct PromptStore {
-  private enum Keys {
-    static let explainTemplate = "prompt.explainTemplate"
-    static let translateTemplate = "prompt.translateTemplate"
+  struct PromptConfig: Codable {
+    struct Explain: Codable {
+      var zh: String
+      var en: String
+    }
+
+    var explain: Explain
+    var translate: String
+    var translateExplain: String?
+
+    static func `default`() -> PromptConfig {
+      PromptConfig(
+        explain: .init(zh: defaultExplainTemplateZh, en: defaultExplainTemplateEn),
+        translate: defaultTranslateTemplate,
+        translateExplain: defaultTranslateExplainTemplate
+      )
+    }
   }
 
-  private let defaults: UserDefaults
+  init() {}
 
-  init(defaults: UserDefaults = .standard) {
-    self.defaults = defaults
-  }
-
-  func explainTemplate() -> String {
-    (defaults.string(forKey: Keys.explainTemplate) ?? Self.defaultExplainTemplate)
+  func explainTemplate(language: AnswerLanguage) -> String {
+    let cfg = loadConfigEnsuringFile()
+    switch language {
+    case .zh: return cfg.explain.zh
+    case .en: return cfg.explain.en
+    }
   }
 
   func translateTemplate() -> String {
-    (defaults.string(forKey: Keys.translateTemplate) ?? Self.defaultTranslateTemplate)
+    loadConfigEnsuringFile().translate
   }
 
-  func setExplainTemplate(_ value: String) {
-    defaults.set(value, forKey: Keys.explainTemplate)
+  func translateExplainTemplate() -> String {
+    let cfg = loadConfigEnsuringFile()
+    let t = (cfg.translateExplain ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    return t.isEmpty ? cfg.translate : t
   }
 
-  func setTranslateTemplate(_ value: String) {
-    defaults.set(value, forKey: Keys.translateTemplate)
+  func configFileURL() -> URL {
+    let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    return base.appendingPathComponent("CopyToAsk", isDirectory: true)
+      .appendingPathComponent("prompts.json")
   }
 
-  func resetExplainTemplate() {
-    defaults.removeObject(forKey: Keys.explainTemplate)
+  func ensureConfigFileExists() {
+    let url = configFileURL()
+    let dir = url.deletingLastPathComponent()
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    if !FileManager.default.fileExists(atPath: url.path) {
+      resetToDefaultConfig()
+    }
   }
 
-  func resetTranslateTemplate() {
-    defaults.removeObject(forKey: Keys.translateTemplate)
+  func resetToDefaultConfig() {
+    let url = configFileURL()
+    let dir = url.deletingLastPathComponent()
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    if let data = try? encoder.encode(PromptConfig.default()) {
+      try? data.write(to: url, options: [.atomic])
+    }
   }
 
-  static let defaultExplainTemplate = """
-请解释下面这段文字的含义，用尽量简明的中文输出：
+  func revealConfigInFinder() {
+    ensureConfigFileExists()
+    NSWorkspace.shared.activateFileViewerSelecting([configFileURL()])
+  }
 
+  func openConfigInEditor() {
+    ensureConfigFileExists()
+    NSWorkspace.shared.open(configFileURL())
+  }
+
+  private func loadConfigEnsuringFile() -> PromptConfig {
+    ensureConfigFileExists()
+    let url = configFileURL()
+    guard let data = try? Data(contentsOf: url) else { return .default() }
+    let decoder = JSONDecoder()
+    if let cfg = try? decoder.decode(PromptConfig.self, from: data) {
+      return cfg
+    }
+    return .default()
+  }
+
+  static let defaultExplainTemplateZh = """
+你会收到两段输入：
+1) 上下文（可为空）
+2) 当前选中文本
+
+上下文：
+{context}
+
+选中文本：
 {text}
 
 要求：
@@ -46,6 +105,24 @@ struct PromptStore {
 2) 再用 3-6 条要点解释关键概念/隐含前提
 3) 如有必要给 1 个简短例子
 4) 不确定的地方明确说明不确定
+"""
+
+  static let defaultExplainTemplateEn = """
+You will receive two inputs:
+1) Context (may be empty)
+2) Selected text
+
+Context:
+{context}
+
+Selected text:
+{text}
+
+Requirements:
+1) One-sentence summary
+2) 3-6 bullet points explaining key concepts/assumptions
+3) One short example if helpful
+4) If uncertain, say so explicitly
 """
 
   static let defaultTranslateTemplate = """
@@ -59,6 +136,8 @@ Rules:
 Text:
 {text}
 """
+
+  static let defaultTranslateExplainTemplate = defaultTranslateTemplate
 }
 
 enum PromptTemplate {

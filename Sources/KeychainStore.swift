@@ -13,19 +13,26 @@ struct KeychainStore {
       kSecAttrAccount as String: account,
     ]
 
-    // Delete + add ensures the item's access control updates to the currently
-    // running app build, avoiding stale ACL prompts after rebuilding.
-    _ = SecItemDelete(query as CFDictionary)
+    // Prefer update to preserve any existing ACL (avoids repeated prompts).
+    let attrs: [String: Any] = [
+      kSecValueData as String: data,
+      kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+      kSecAttrLabel as String: "CopyToAsk OpenAI API Key",
+      kSecAttrDescription as String: "OpenAI API key for CopyToAsk",
+    ]
 
-    var addQuery = query
-    addQuery[kSecValueData as String] = data
-    addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-    addQuery[kSecAttrLabel as String] = "CopyToAsk OpenAI API Key"
-    addQuery[kSecAttrDescription as String] = "OpenAI API key for CopyToAsk"
-
-    let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-    guard addStatus == errSecSuccess else {
-      throw NSError(domain: NSOSStatusErrorDomain, code: Int(addStatus))
+    let updateStatus = SecItemUpdate(query as CFDictionary, attrs as CFDictionary)
+    if updateStatus == errSecItemNotFound {
+      var addQuery = query
+      for (k, v) in attrs { addQuery[k] = v }
+      let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+      guard addStatus == errSecSuccess else {
+        throw NSError(domain: NSOSStatusErrorDomain, code: Int(addStatus))
+      }
+      return
+    }
+    guard updateStatus == errSecSuccess else {
+      throw NSError(domain: NSOSStatusErrorDomain, code: Int(updateStatus))
     }
   }
 

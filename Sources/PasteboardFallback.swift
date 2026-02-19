@@ -1,6 +1,7 @@
 import Cocoa
 import ApplicationServices
 
+@MainActor
 enum PasteboardFallback {
   private struct Snapshot {
     let items: [NSPasteboardItem]
@@ -8,20 +9,54 @@ enum PasteboardFallback {
 
   static func copySelectionViaCmdCAndReadPasteboard() -> String? {
     let pb = NSPasteboard.general
+    let beforeChange = pb.changeCount
     let snapshot = snapshotPasteboard(pb)
 
     // Trigger Cmd+C
     postCmdC()
 
-    // Wait briefly for pasteboard to update
-    Thread.sleep(forTimeInterval: 0.12)
-
-    let copied = pb.string(forType: .string)
+    // Wait for pasteboard to update (best-effort). If copy injection is blocked
+    // by system privacy, changeCount may not advance; in that case, fail.
+    var copied: String?
+    var didUpdate = false
+    let deadline = Date().addingTimeInterval(0.8)
+    while Date() < deadline {
+      if pb.changeCount != beforeChange {
+        didUpdate = true
+        copied = pb.string(forType: .string)
+        break
+      }
+      Thread.sleep(forTimeInterval: 0.03)
+    }
 
     // Restore pasteboard (best-effort)
     restorePasteboard(pb, snapshot: snapshot)
 
-    return copied
+    // If copy never updated the pasteboard, don't return a stale clipboard value.
+    return didUpdate ? copied : nil
+  }
+
+  static func copySelectionViaCmdCAndReadPasteboardAsync() async -> String? {
+    let pb = NSPasteboard.general
+    let beforeChange = pb.changeCount
+    let snapshot = snapshotPasteboard(pb)
+
+    postCmdC()
+
+    let start = Date()
+    var copied: String?
+    var didUpdate = false
+    while Date().timeIntervalSince(start) < 0.8 {
+      if pb.changeCount != beforeChange {
+        didUpdate = true
+        copied = pb.string(forType: .string)
+        break
+      }
+      try? await Task.sleep(nanoseconds: 30_000_000)
+    }
+
+    restorePasteboard(pb, snapshot: snapshot)
+    return didUpdate ? copied : nil
   }
 
   private static func snapshotPasteboard(_ pb: NSPasteboard) -> Snapshot {

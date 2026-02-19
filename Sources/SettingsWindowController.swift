@@ -5,24 +5,33 @@ import UniformTypeIdentifiers
 final class SettingsWindowController: NSWindowController {
   private let settings: AppSettings
 
+  private var ui: InterfaceLanguage { settings.interfaceLanguage }
+
+  private func t(_ en: String, _ zh: String) -> String {
+    (ui == .zh) ? zh : en
+  }
+
   // Actions provided by AppDelegate.
-  var onSetHotKey: (() -> Void)?
-  var getHotKeyLabel: (() -> String)?
+  var onSetHotKey: ((HotKeyAction) -> Void)?
+  var getHotKeyLabel: ((HotKeyAction) -> String)?
 
   var onSetAPIKey: (() -> Void)?
   var onClearAPIKey: (() -> Void)?
   var getAPIKeyStatus: (() -> String)?
 
-  var onEditExplainPrompt: (() -> Void)?
-  var onResetExplainPrompt: (() -> Void)?
-  var onEditTranslatePrompt: (() -> Void)?
-  var onResetTranslatePrompt: (() -> Void)?
+  var onOpenPromptsConfig: (() -> Void)?
+  var onRevealPromptsConfig: (() -> Void)?
+  var onResetPromptsConfig: (() -> Void)?
 
   var onOpenHistoryFolder: (() -> Void)?
   var onSummarizeHistoryFile: (([URL]) -> Void)?
   var onPruneHistoryNow: (() -> Void)?
 
+  var onInterfaceLanguageChanged: ((InterfaceLanguage) -> Void)?
+
   private var hotKeyValueLabel: NSTextField?
+  private var askHotKeyValueLabel: NSTextField?
+  private var contextHotKeyValueLabel: NSTextField?
   private var apiKeyStatusLabel: NSTextField?
   private var explainTierControl: NSSegmentedControl?
   private var summaryTierControl: NSSegmentedControl?
@@ -37,6 +46,9 @@ final class SettingsWindowController: NSWindowController {
   private var historyFilePopup: NSPopUpButton?
   private var selectedSummaryFiles: [URL] = []
 
+  private var interfaceLanguagePopup: NSPopUpButton?
+  private var interfaceLanguageLabel: NSTextField?
+
   init(settings: AppSettings = .shared) {
     self.settings = settings
     let w = NSWindow(
@@ -46,6 +58,9 @@ final class SettingsWindowController: NSWindowController {
       defer: false
     )
     w.title = "CopyToAsk Settings"
+    // Ensure it can be reopened reliably and appears over fullscreen apps.
+    w.isReleasedWhenClosed = false
+    w.collectionBehavior = w.collectionBehavior.union([.canJoinAllSpaces, .fullScreenAuxiliary])
     super.init(window: w)
     setupUI()
   }
@@ -53,8 +68,13 @@ final class SettingsWindowController: NSWindowController {
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
   func show() {
+    TraceLog.log("SettingsWindowController.show")
     refresh()
+    if let w = window, !w.isVisible {
+      w.center()
+    }
     NSRunningApplication.current.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
+    window?.orderFrontRegardless()
     window?.makeKeyAndOrderFront(nil)
   }
 
@@ -94,23 +114,52 @@ final class SettingsWindowController: NSWindowController {
       stack.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
     ])
 
-    stack.addArrangedSubview(sectionTitle("General"))
-    stack.addArrangedSubview(buildHotkeyRow())
+    stack.addArrangedSubview(sectionTitle(t("General", "通用")))
+    stack.addArrangedSubview(buildHotkeyRow(title: t("Explain hotkey", "解释快捷键"), outLabel: &hotKeyValueLabel, action: #selector(setExplainHotKeyTapped)))
+    stack.addArrangedSubview(buildHotkeyRow(title: t("Ask hotkey", "提问快捷键"), outLabel: &askHotKeyValueLabel, action: #selector(setAskHotKeyTapped)))
+    stack.addArrangedSubview(buildHotkeyRow(title: t("Context hotkey", "上下文快捷键"), outLabel: &contextHotKeyValueLabel, action: #selector(setContextHotKeyTapped)))
+
+    stack.addArrangedSubview(buildInterfaceLanguageRow())
 
     stack.addArrangedSubview(sectionTitle("OpenAI"))
     stack.addArrangedSubview(buildAPIKeyRow())
 
-    stack.addArrangedSubview(sectionTitle("Models"))
-    stack.addArrangedSubview(buildTierRow(title: "Explain", outControl: &explainTierControl, action: #selector(explainTierChanged)))
-    stack.addArrangedSubview(buildTierRow(title: "Summary", outControl: &summaryTierControl, action: #selector(summaryTierChanged)))
+    stack.addArrangedSubview(sectionTitle(t("Models", "模型")))
+    stack.addArrangedSubview(buildTierRow(title: t("Explain", "解释"), outControl: &explainTierControl, action: #selector(explainTierChanged)))
+    stack.addArrangedSubview(buildTierRow(title: t("Summary", "总结"), outControl: &summaryTierControl, action: #selector(summaryTierChanged)))
     stack.addArrangedSubview(buildModelIdGrid())
 
-    stack.addArrangedSubview(sectionTitle("Prompts"))
+    stack.addArrangedSubview(sectionTitle(t("Prompts", "提示词")))
     stack.addArrangedSubview(buildPromptRow())
 
-    stack.addArrangedSubview(sectionTitle("History"))
+    stack.addArrangedSubview(sectionTitle(t("History", "历史记录")))
     stack.addArrangedSubview(buildHistoryRow())
     stack.addArrangedSubview(buildRetentionRow())
+  }
+
+  private func rebuildUI() {
+    guard let window else { return }
+
+    // Replace the contentView to drop previous constraints cleanly.
+    window.contentView = NSView()
+
+    hotKeyValueLabel = nil
+    askHotKeyValueLabel = nil
+    contextHotKeyValueLabel = nil
+    apiKeyStatusLabel = nil
+    explainTierControl = nil
+    summaryTierControl = nil
+    cheapModelField = nil
+    mediumModelField = nil
+    detailedModelField = nil
+    retentionToggle = nil
+    retentionDaysField = nil
+    retentionStepper = nil
+    historyFilePopup = nil
+    interfaceLanguagePopup = nil
+    interfaceLanguageLabel = nil
+
+    setupUI()
   }
 
   private func sectionTitle(_ text: String) -> NSTextField {
@@ -119,26 +168,52 @@ final class SettingsWindowController: NSWindowController {
     return l
   }
 
-  private func buildHotkeyRow() -> NSView {
+  private func buildHotkeyRow(title: String, outLabel: inout NSTextField?, action: Selector) -> NSView {
     let row = NSStackView()
     row.orientation = .horizontal
     row.alignment = .centerY
     row.spacing = 10
 
-    let label = NSTextField(labelWithString: "Hotkey")
+    let label = NSTextField(labelWithString: title)
     label.font = .systemFont(ofSize: 13, weight: .regular)
     label.setContentHuggingPriority(.required, for: .horizontal)
 
+    label.widthAnchor.constraint(equalToConstant: 110).isActive = true
+
     let value = NSTextField(labelWithString: "")
     value.font = .systemFont(ofSize: 13, weight: .semibold)
-    self.hotKeyValueLabel = value
+    outLabel = value
 
-    let set = NSButton(title: "Set…", target: self, action: #selector(setHotKeyTapped))
+    let set = NSButton(title: t("Set…", "设置…"), target: self, action: action)
     set.bezelStyle = .rounded
 
     row.addArrangedSubview(label)
     row.addArrangedSubview(value)
     row.addArrangedSubview(set)
+    return row
+  }
+
+  private func buildInterfaceLanguageRow() -> NSView {
+    let row = NSStackView()
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.spacing = 10
+
+    let label = NSTextField(labelWithString: t("Interface language", "界面语言"))
+    label.font = .systemFont(ofSize: 13)
+    label.setContentHuggingPriority(.required, for: .horizontal)
+    label.widthAnchor.constraint(equalToConstant: 110).isActive = true
+    interfaceLanguageLabel = label
+
+    let popup = NSPopUpButton()
+    popup.addItem(withTitle: InterfaceLanguage.en.displayName)
+    popup.addItem(withTitle: InterfaceLanguage.zh.displayName)
+    popup.target = self
+    popup.action = #selector(interfaceLanguageChanged)
+    interfaceLanguagePopup = popup
+
+    row.addArrangedSubview(label)
+    row.addArrangedSubview(popup)
     return row
   }
 
@@ -148,7 +223,7 @@ final class SettingsWindowController: NSWindowController {
     row.alignment = .centerY
     row.spacing = 10
 
-    let label = NSTextField(labelWithString: "API Key")
+    let label = NSTextField(labelWithString: t("Auth", "认证"))
     label.font = .systemFont(ofSize: 13)
     label.setContentHuggingPriority(.required, for: .horizontal)
     label.widthAnchor.constraint(equalToConstant: 70).isActive = true
@@ -158,9 +233,9 @@ final class SettingsWindowController: NSWindowController {
     status.textColor = .secondaryLabelColor
     apiKeyStatusLabel = status
 
-    let set = NSButton(title: "Set…", target: self, action: #selector(setAPIKeyTapped))
+    let set = NSButton(title: t("OpenAI Auth…", "OpenAI 登录…"), target: self, action: #selector(setAPIKeyTapped))
     set.bezelStyle = .rounded
-    let clear = NSButton(title: "Clear", target: self, action: #selector(clearAPIKeyTapped))
+    let clear = NSButton(title: t("Clear", "清除"), target: self, action: #selector(clearAPIKeyTapped))
     clear.bezelStyle = .rounded
 
     row.addArrangedSubview(label)
@@ -193,9 +268,9 @@ final class SettingsWindowController: NSWindowController {
 
   private func buildModelIdGrid() -> NSView {
     let grid = NSGridView(views: [
-      [NSTextField(labelWithString: "Cheap model id"), NSTextField(string: "")],
-      [NSTextField(labelWithString: "Medium model id"), NSTextField(string: "")],
-      [NSTextField(labelWithString: "Detailed model id"), NSTextField(string: "")],
+      [NSTextField(labelWithString: t("Cheap model id", "低价模型 ID")), NSTextField(string: "")],
+      [NSTextField(labelWithString: t("Medium model id", "中档模型 ID")), NSTextField(string: "")],
+      [NSTextField(labelWithString: t("Detailed model id", "高质量模型 ID")), NSTextField(string: "")],
     ])
 
     grid.rowSpacing = 8
@@ -208,7 +283,7 @@ final class SettingsWindowController: NSWindowController {
 
       let field = grid.cell(atColumnIndex: 1, rowIndex: r).contentView as! NSTextField
       field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-      field.placeholderString = "e.g. gpt-4o-mini"
+      field.placeholderString = t("e.g. gpt-4o-mini", "例如 gpt-4o-mini")
       field.target = self
       field.action = #selector(modelIdEdited)
       field.translatesAutoresizingMaskIntoConstraints = false
@@ -223,25 +298,41 @@ final class SettingsWindowController: NSWindowController {
   }
 
   private func buildPromptRow() -> NSView {
+    let col = NSStackView()
+    col.orientation = .vertical
+    col.alignment = .leading
+    col.spacing = 8
+
+    let note = NSTextField(labelWithString: t(
+      "Prompts are configured via a JSON file (prompts.json). Edit it in your editor and changes will apply on next request.",
+      "提示词通过 JSON 文件（prompts.json）配置。用编辑器修改后，会在下一次请求时生效。"
+    ))
+    note.font = .systemFont(ofSize: 12)
+    note.textColor = .secondaryLabelColor
+    note.lineBreakMode = .byWordWrapping
+    note.maximumNumberOfLines = 0
+    note.translatesAutoresizingMaskIntoConstraints = false
+    note.widthAnchor.constraint(equalToConstant: 560).isActive = true
+
     let row = NSStackView()
     row.orientation = .horizontal
     row.alignment = .centerY
     row.spacing = 10
 
-    let editExplain = NSButton(title: "Edit Explain…", target: self, action: #selector(editExplainTapped))
-    editExplain.bezelStyle = .rounded
-    let resetExplain = NSButton(title: "Reset Explain", target: self, action: #selector(resetExplainTapped))
-    resetExplain.bezelStyle = .rounded
-    let editTranslate = NSButton(title: "Edit Translate…", target: self, action: #selector(editTranslateTapped))
-    editTranslate.bezelStyle = .rounded
-    let resetTranslate = NSButton(title: "Reset Translate", target: self, action: #selector(resetTranslateTapped))
-    resetTranslate.bezelStyle = .rounded
+    let open = NSButton(title: t("Open prompts.json", "打开 prompts.json"), target: self, action: #selector(openPromptsTapped))
+    open.bezelStyle = .rounded
+    let reveal = NSButton(title: t("Reveal in Finder", "在 Finder 中显示"), target: self, action: #selector(revealPromptsTapped))
+    reveal.bezelStyle = .rounded
+    let reset = NSButton(title: t("Reset to Default", "恢复默认"), target: self, action: #selector(resetPromptsTapped))
+    reset.bezelStyle = .rounded
 
-    row.addArrangedSubview(editExplain)
-    row.addArrangedSubview(resetExplain)
-    row.addArrangedSubview(editTranslate)
-    row.addArrangedSubview(resetTranslate)
-    return row
+    row.addArrangedSubview(open)
+    row.addArrangedSubview(reveal)
+    row.addArrangedSubview(reset)
+
+    col.addArrangedSubview(note)
+    col.addArrangedSubview(row)
+    return col
   }
 
   private func buildHistoryRow() -> NSView {
@@ -250,20 +341,20 @@ final class SettingsWindowController: NSWindowController {
     row.alignment = .centerY
     row.spacing = 10
 
-    let open = NSButton(title: "Open Folder", target: self, action: #selector(openHistoryTapped))
+    let open = NSButton(title: t("Open Folder", "打开文件夹"), target: self, action: #selector(openHistoryTapped))
     open.bezelStyle = .rounded
 
     let popup = NSPopUpButton()
     popup.controlSize = .small
     popup.target = self
     popup.action = #selector(historyFileSelected)
-    popup.addItem(withTitle: "Select a day…")
+    popup.addItem(withTitle: t("Select a day…", "选择日期…"))
     historyFilePopup = popup
 
-    let choose = NSButton(title: "Choose JSONL…", target: self, action: #selector(chooseHistoryFileTapped))
+    let choose = NSButton(title: t("Choose JSONL…", "选择 JSONL…"), target: self, action: #selector(chooseHistoryFileTapped))
     choose.bezelStyle = .rounded
 
-    let summarize = NSButton(title: "Summarize → Markdown", target: self, action: #selector(summarizeTapped))
+    let summarize = NSButton(title: t("Summarize → Markdown", "汇总 → Markdown"), target: self, action: #selector(summarizeTapped))
     summarize.bezelStyle = .rounded
 
     row.addArrangedSubview(open)
@@ -279,7 +370,7 @@ final class SettingsWindowController: NSWindowController {
     row.alignment = .centerY
     row.spacing = 10
 
-    let toggle = NSButton(checkboxWithTitle: "Auto-delete history older than", target: self, action: #selector(retentionToggled))
+    let toggle = NSButton(checkboxWithTitle: t("Auto-delete history older than", "自动删除早于"), target: self, action: #selector(retentionToggled))
     retentionToggle = toggle
 
     let daysField = NSTextField(string: "")
@@ -298,10 +389,10 @@ final class SettingsWindowController: NSWindowController {
     stepper.action = #selector(retentionStepperChanged)
     retentionStepper = stepper
 
-    let suffix = NSTextField(labelWithString: "days")
+    let suffix = NSTextField(labelWithString: t("days", "天"))
     suffix.textColor = .secondaryLabelColor
 
-    let prune = NSButton(title: "Prune Now", target: self, action: #selector(pruneNowTapped))
+    let prune = NSButton(title: t("Prune Now", "立即清理"), target: self, action: #selector(pruneNowTapped))
     prune.bezelStyle = .rounded
 
     row.addArrangedSubview(toggle)
@@ -313,7 +404,9 @@ final class SettingsWindowController: NSWindowController {
   }
 
   func refresh() {
-    hotKeyValueLabel?.stringValue = getHotKeyLabel?() ?? ""
+    hotKeyValueLabel?.stringValue = getHotKeyLabel?(.explain) ?? ""
+    askHotKeyValueLabel?.stringValue = getHotKeyLabel?(.ask) ?? ""
+    contextHotKeyValueLabel?.stringValue = getHotKeyLabel?(.setContext) ?? ""
     apiKeyStatusLabel?.stringValue = getAPIKeyStatus?() ?? ""
 
     explainTierControl?.selectedSegment = indexForTier(settings.explainTier)
@@ -329,12 +422,17 @@ final class SettingsWindowController: NSWindowController {
     setRetentionControlsEnabled(settings.historyRetentionEnabled)
 
     reloadHistoryFiles()
+
+    let ui = settings.interfaceLanguage
+    window?.title = (ui == .zh) ? "CopyToAsk 设置" : "CopyToAsk Settings"
+    interfaceLanguageLabel?.stringValue = (ui == .zh) ? "界面语言" : "Interface language"
+    interfaceLanguagePopup?.selectItem(at: (ui == .zh) ? 1 : 0)
   }
 
   private func reloadHistoryFiles() {
     let popup = historyFilePopup
     popup?.removeAllItems()
-    popup?.addItem(withTitle: "Select a day…")
+    popup?.addItem(withTitle: t("Select a day…", "选择日期…"))
     let files = (try? FileManager.default.contentsOfDirectory(at: HistoryStore.shared.historyDirectoryURL(), includingPropertiesForKeys: nil)) ?? []
     let jsonls = files.filter { $0.pathExtension.lowercased() == "jsonl" }.sorted { $0.lastPathComponent > $1.lastPathComponent }
     for url in jsonls.prefix(90) {
@@ -364,7 +462,23 @@ final class SettingsWindowController: NSWindowController {
     }
   }
 
-  @objc private func setHotKeyTapped() { onSetHotKey?() }
+  @objc private func setExplainHotKeyTapped() { onSetHotKey?(.explain) }
+  @objc private func setAskHotKeyTapped() { onSetHotKey?(.ask) }
+  @objc private func setContextHotKeyTapped() { onSetHotKey?(.setContext) }
+
+  @objc private func interfaceLanguageChanged() {
+    let idx = interfaceLanguagePopup?.indexOfSelectedItem ?? 0
+    let lang: InterfaceLanguage = (idx == 1) ? .zh : .en
+    settings.interfaceLanguage = lang
+    onInterfaceLanguageChanged?(lang)
+
+    // Rebuild on next runloop so we don't destroy the active popup mid-action.
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.rebuildUI()
+      self.refresh()
+    }
+  }
   @objc private func setAPIKeyTapped() { onSetAPIKey?() }
   @objc private func clearAPIKeyTapped() { onClearAPIKey?() }
 
@@ -385,10 +499,9 @@ final class SettingsWindowController: NSWindowController {
     if !detailed.isEmpty { settings.detailedModelId = detailed }
   }
 
-  @objc private func editExplainTapped() { onEditExplainPrompt?() }
-  @objc private func resetExplainTapped() { onResetExplainPrompt?() }
-  @objc private func editTranslateTapped() { onEditTranslatePrompt?() }
-  @objc private func resetTranslateTapped() { onResetTranslatePrompt?() }
+  @objc private func openPromptsTapped() { onOpenPromptsConfig?() }
+  @objc private func revealPromptsTapped() { onRevealPromptsConfig?() }
+  @objc private func resetPromptsTapped() { onResetPromptsConfig?() }
 
   @objc private func openHistoryTapped() { onOpenHistoryFolder?() }
 
@@ -418,7 +531,7 @@ final class SettingsWindowController: NSWindowController {
       } else {
         self.selectedSummaryFiles = urls
         self.historyFilePopup?.selectItem(at: 0)
-        self.historyFilePopup?.addItem(withTitle: "\(urls.count) files selected")
+        self.historyFilePopup?.addItem(withTitle: self.t("\(urls.count) files selected", "已选择 \(urls.count) 个文件"))
         self.historyFilePopup?.lastItem?.representedObject = urls
         self.historyFilePopup?.selectItem(at: (self.historyFilePopup?.numberOfItems ?? 1) - 1)
       }
